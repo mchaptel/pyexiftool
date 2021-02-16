@@ -61,6 +61,8 @@ import os
 import json
 import warnings
 import codecs
+import locale
+
 
 try:        # Py3k compatibility
     basestring
@@ -115,6 +117,11 @@ del _fscodec
 class ExifTool(object):
     """Run the `exiftool` command-line tool and communicate to it.
 
+    The argument ``print_conversion`` determines whether exiftool should
+    perform print conversion, which prints values in a human-readable way but
+    may be slower. If print conversion is enabled, appending ``#`` to a tag
+    name disables the print conversion for this particular tag.
+
     You can pass the file name of the ``exiftool`` executable as an
     argument to the constructor.  The default value ``exiftool`` will
     only work if the executable is in your ``PATH``.
@@ -148,7 +155,8 @@ class ExifTool(object):
        associated with a running subprocess.
     """
 
-    def __init__(self, executable_=None):
+    def __init__(self, executable_=None, print_conversion=False):
+        self.print_conversion = print_conversion
         if executable_ is None:
             self.executable = executable
         else:
@@ -158,18 +166,20 @@ class ExifTool(object):
     def start(self):
         """Start an ``exiftool`` process in batch mode for this instance.
 
-        This method will issue a ``UserWarning`` if the subprocess is
-        already running.  The process is started with the ``-G`` and
-        ``-n`` as common arguments, which are automatically included
-        in every command you run with :py:meth:`execute()`.
+        This method will issue a ``UserWarning`` if the subprocess is already
+        running.  The process is started with ``-G`` (and, if print conversion
+        was disabled, ``-n``) as common arguments, which are automatically
+        included in every command you run with :py:meth:`execute()`.
         """
         if self.running:
             warnings.warn("ExifTool already running; doing nothing.")
             return
+        command = [self.executable, "-stay_open", "True",  "-@", "-", "-common_args", "-G", "-m"]
+        if not self.print_conversion:
+            command.append("-n")
         with open(os.devnull, "w") as devnull:
             self._process = subprocess.Popen(
-                [self.executable, "-stay_open", "True",  "-@", "-",
-                 "-common_args", "-G", "-n"],
+                command,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=devnull)
         self.running = True
@@ -249,7 +259,7 @@ class ExifTool(object):
         as Unicode strings in Python 3.x.
         """
         params = map(fsencode, params)
-        return json.loads(self.execute(b"-j", *params).decode("utf-8"))
+        return json.loads(self.execute(b"-j", *params).decode(locale.getpreferredencoding()))
 
     def get_metadata_batch(self, filenames):
         """Return all meta-data for the given files.
@@ -316,6 +326,7 @@ class ExifTool(object):
             result.append(next(iter(d.values()), None))
         return result
 
+
     def get_tag(self, tag, filename):
         """Extract a single tag from a single file.
 
@@ -323,3 +334,63 @@ class ExifTool(object):
         ``None`` if this tag was not found in the file.
         """
         return self.get_tag_batch(tag, [filename])[0]
+
+
+    def set_tags_batch(self, tags, values, filenames, add_to_existing=False):
+        """Sets only the specified tags to specified values for the given files.
+
+        Args:
+            tags (:obj:`list` of :obj:`str`) : an iterable of tags.
+                The tag names may include group names, as usual in the format <group>:<tag>.
+            values (:obj:`list` of :obj:`str`) : a list of values for the tags specified,
+                which must have the same length as the tags.
+                To set multiple values (for example for XMP:Subject),
+                repeat the tag name as many times as there are values to set.
+            filenames (:obj:`list` of :obj:`str`) : an iterable of file names.
+            add_to_existing (bool) : wether to add the new values or
+                replace all existing values for this tag.
+
+        Returns:
+            The format of the return value is only a string with the amount
+            of written files, or any warning issued by the exiftool bin.
+        """
+        # Explicitly ruling out strings here because passing in a
+        # string would lead to strange and hard-to-find errors
+        if isinstance(tags, basestring):
+            raise TypeError("The argument 'tags' must be "
+                            "an iterable of strings")
+        if isinstance(values, basestring):
+            raise TypeError("The argument 'values' must be "
+                            "an iterable of strings")
+        if isinstance(filenames, basestring):
+            raise TypeError("The argument 'filenames' must be "
+                            "an iterable of strings")
+
+        operator = "+=" if add_to_existing else "="
+
+        params = []
+        for index, tag in enumerate(tags):
+            params.append("-" + tag + operator + values[index])
+        params.extend(filenames)
+        return self.execute(*[param.encode(locale.getpreferredencoding()) for param in params])
+
+    def set_tags(self, tag_names, values, filename, add_to_existing=False):
+        """
+        Sets the specified tags values to the file.
+        """
+        data = self.set_tags_batch(tag_names, values, [filename], add_to_existing)
+        return data.decode(locale.getpreferredencoding())
+
+    def set_tag(self, tag_name, value, filename, add_to_existing=False):
+        """
+        Sets the specified tag value to the file.
+        """
+        data = self.set_tag_batch(tag_name, value, [filename], add_to_existing)
+        return data.decode(locale.getpreferredencoding())
+
+    def set_tag_batch(self, tag_name, value, filenames, add_to_existing=False):
+        """
+        Sets the specified tag value to the list of files.
+        """
+        data = self.set_tags_batch([tag_name], [value], filenames, add_to_existing)
+        return data.decode(locale.getpreferredencoding())
